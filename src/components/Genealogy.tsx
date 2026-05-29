@@ -1,14 +1,16 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef } from "react";
+import * as XLSX from "xlsx";
 import { motion, AnimatePresence } from "motion/react";
-import { Search, Filter, ShieldAlert, User, UserCheck, Award, Heart, Edit3, Plus, ArrowRight, X, Calendar, MapPin, Eye, Database, Copy, Check } from "lucide-react";
+import { Search, Filter, ShieldAlert, User, UserCheck, Award, Heart, Edit3, Plus, ArrowRight, X, Calendar, MapPin, Eye, Database, Copy, Check, Upload, Download, AlertCircle } from "lucide-react";
 import { FamilyMember } from "../types";
 
 interface GenealogyProps {
   members: FamilyMember[];
   onAddMember: (member: FamilyMember) => void;
+  onBulkImport?: (newMembers: FamilyMember[], mode: "replace" | "append") => void;
 }
 
-export default function Genealogy({ members, onAddMember }: GenealogyProps) {
+export default function Genealogy({ members, onAddMember, onBulkImport }: GenealogyProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedBranch, setSelectedBranch] = useState("Tất cả chi");
   const [selectedGen, setSelectedGen] = useState<number | "Tất cả đời">("Tất cả đời");
@@ -21,6 +23,72 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
   const [parsedPreview, setParsedPreview] = useState<any[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
   const [excelActiveTab, setExcelActiveTab] = useState<"paste" | "script">("paste");
+  
+  // Custom states for premium Excel upload & 55 column matching
+  const [importMode, setImportMode] = useState<"append" | "replace">("append");
+  const [uploadFileName, setUploadFileName] = useState("");
+  const [validationScore, setValidationScore] = useState<number | null>(null);
+  const [columnMatches, setColumnMatches] = useState<{name: string, status: "matched" | "mismatched" | "empty", sampleValue?: string}[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Standard 55-column layout template sent yesterday 
+  const FAMILY_COLUMNS_SPEC = useMemo(() => [
+    "Mã định danh cá nhân",
+    "Họ và tên đầy đủ",
+    "Giới tính",
+    "Tên thường gọi / Bí danh / Tên tự (nếu có)",
+    "Số điện thoại",
+    "Số điện thoại phụ",
+    "Nơi ở",
+    "Email",
+    "Ngày sinh (Trên giấy tờ)",
+    "Tình trạng (còn sống/đã mất)",
+    "(Nếu đã mất) Ngày tháng năm mất (dương lịch)",
+    "(Nếu đã mất) Ngày mất theo âm lịch / Kỵ nhật",
+    "(Nếu đã mất) Nơi an táng",
+    "Đời thứ mấy",
+    "Họ và tên Cha ruột",
+    "Nơi ở của cha ruột",
+    "Số điện thoại của cha",
+    "Ngày sinh (Trên giấy tờ) của cha",
+    "Tình trạng (còn sống/đã mất) của cha",
+    "(Nếu đã mất) Ngày tháng năm mất (dương lịch) của cha",
+    "(Nếu đã mất) Ngày mất theo âm lịch / Kỵ nhật của cha",
+    "(Nếu đã mất) Nơi an táng của cha",
+    "Mã số cha",
+    "Họ và tên Mẹ ruột",
+    "Nơi ở của mẹ",
+    "Số điện thoại của mẹ",
+    "Ngày sinh (Trên giấy tờ) của mẹ",
+    "Tình trạng của mẹ (còn sống/đã mất)",
+    "(Nếu đã mất) Ngày tháng năm mất (dương lịch) của mẹ",
+    "(Nếu đã mất) Ngày mất theo âm lịch / Kỵ nhật của mẹ",
+    "(Nếu đã mất) Nơi an táng của mẹ",
+    "Họ và tên Vợ/Chồng",
+    "Nơi ở của Vợ/Chồng",
+    "Số điện thoại của Vợ/Chồng",
+    "Ngày sinh (Trên giấy tờ) Vợ/Chồng",
+    "Tình trạng (còn sống/đã mất) Vợ/Chồng",
+    "(Nếu đã mất) Ngày tháng năm mất (dương lịch) Vợ/Chồng",
+    "(Nếu đã mất) Ngày mất theo âm lịch / Kỵ nhật Vợ/Chồng",
+    "(Nếu đã mất) Nơi an táng Vợ/Chồng",
+    "Con ruột 1",
+    "Giới tính con ruột 1",
+    "Con ruột 2",
+    "Giới tính con ruột 2",
+    "Con ruột 3",
+    "Giới tính con ruột 3",
+    "Con ruột 4",
+    "Giới tính con ruột 4",
+    "Con ruột 5",
+    "Giới tính con ruột 5",
+    "Con ruột 6",
+    "Giới tính con ruột 6",
+    "Con ruột 7",
+    "Giới tính con ruột 7",
+    "Con ruột 8",
+    "Giới tính con ruột 8"
+  ], []);
 
   // Form states
   const [newName, setNewName] = useState("");
@@ -85,77 +153,319 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
     setIsAddOpen(false);
   };
 
-  // Excel parsed copy paste bulk handlers
+  // Excel formatting assessment generator
+  const runFormatVerification = (detectedHeaders: string[], firstDataRow: any[]) => {
+    let matchedCount = 0;
+    const matches = FAMILY_COLUMNS_SPEC.map((specName, specIdx) => {
+      const incomingHeader = detectedHeaders[specIdx] ? String(detectedHeaders[specIdx]).trim() : "";
+      const sampleCell = firstDataRow && firstDataRow[specIdx] !== undefined ? String(firstDataRow[specIdx]).trim() : "";
+      
+      let status: "matched" | "mismatched" | "empty" = "empty";
+      
+      if (incomingHeader) {
+        const simplifiedSpec = specName.toLowerCase().replace(/\s+/g, "").replace(/[^a-z0-9àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/g, "");
+        const simplifiedIncoming = incomingHeader.toLowerCase().replace(/\s+/g, "").replace(/[^a-z0-9àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/g, "");
+        if (simplifiedIncoming.includes(simplifiedSpec) || simplifiedSpec.includes(simplifiedIncoming)) {
+          status = "matched";
+          matchedCount++;
+        } else {
+          status = "mismatched";
+        }
+      } else {
+        status = "empty";
+      }
+      
+      return {
+        name: specName,
+        status,
+        sampleValue: sampleCell || undefined
+      };
+    });
+
+    const score = Math.round((matchedCount / FAMILY_COLUMNS_SPEC.length) * 100);
+    setValidationScore(score);
+    setColumnMatches(matches);
+  };
+
+  // Convert raw row array matrix into standardized objects
+  const parseSheetRows = (sheetRows: any[][]) => {
+    if (!sheetRows || sheetRows.length === 0) {
+      throw new Error("Không phát hiện hàng dữ liệu hợp lệ trong bảng tính.");
+    }
+
+    // Determine if the first row is a header row
+    const firstRowCells = sheetRows[0].map(c => c ? String(c).trim().toLowerCase() : "");
+    const headerIndicators = ["định danh", "họ và tên", "ngày sinh", "giới tính", "tình trạng", "đời thứ"];
+    const isHeaderRow = firstRowCells.some(cell => headerIndicators.some(indicator => cell.includes(indicator)));
+
+    let headers: string[] = [];
+    let dataStartIndex = 0;
+
+    if (isHeaderRow) {
+      headers = sheetRows[0].map(c => c ? String(c).trim() : "");
+      dataStartIndex = 1;
+    } else {
+      headers = [...FAMILY_COLUMNS_SPEC];
+      dataStartIndex = 0;
+    }
+
+    const sampleRow = sheetRows[dataStartIndex] || [];
+    runFormatVerification(headers, sampleRow);
+
+    const parsedMembers: any[] = [];
+    const timestampSeed = Date.now();
+
+    for (let r = dataStartIndex; r < sheetRows.length; r++) {
+      const row = sheetRows[r];
+      if (!row || row.length < 2) continue;
+      
+      const rawName = row[1] ? String(row[1]).trim() : "";
+      if (!rawName) continue; // Name is required
+
+      const rawId = row[0] ? String(row[0]).trim() : "";
+      const finalId = rawId || `m_excel_${timestampSeed}_${r}`;
+
+      const rawGender = row[2] ? String(row[2]).trim().toLowerCase() : "nam";
+      const gender: "Nghị" | "Nữ" = (rawGender === "nữ" || rawGender.includes("nữ") || rawGender === "female") ? "Nữ" : "Nghị";
+
+      const alias = row[3] ? String(row[3]).trim() : "";
+      const phone = row[4] ? String(row[4]).trim() : "";
+      const phonePhu = row[5] ? String(row[5]).trim() : "";
+      const residency = row[6] ? String(row[6]).trim() : "";
+      const email = row[7] ? String(row[7]).trim() : "";
+      
+      const birthYear = row[8] ? String(row[8]).trim() : "";
+      const statusText = row[9] ? String(row[9]).trim().toLowerCase() : "còn sống";
+      const isDeceased = statusText.includes("mất") || statusText.includes("đã mất") || statusText.includes("qua đời") || statusText.includes("deceased");
+
+      const deathYear = row[10] ? String(row[10]).trim() : "";
+      const deathAnniversaryLunar = row[11] ? String(row[11]).trim() : "";
+      const graveLocation = row[12] ? String(row[12]).trim() : "";
+
+      const generationVal = parseInt(String(row[13])) || 8;
+      const fatherName = row[14] ? String(row[14]).trim() : "";
+      const fatherAddress = row[15] ? String(row[15]).trim() : "";
+      const parentId = row[22] ? String(row[22]).trim() : undefined;
+      const motherName = row[23] ? String(row[23]).trim() : "";
+
+      const spouse = row[31] ? String(row[31]).trim() : undefined;
+      const spouseAddress = row[32] ? String(row[32]).trim() : "";
+
+      // Gather child names
+      const childrenList: string[] = [];
+      for (let colIdx = 39; colIdx < 55; colIdx += 2) {
+        const childName = row[colIdx] ? String(row[colIdx]).trim() : "";
+        if (childName) {
+          const childGender = row[colIdx + 1] ? String(row[colIdx + 1]).trim() : "";
+          childrenList.push(`${childName}${childGender ? ` (${childGender})` : ""}`);
+        }
+      }
+
+      let bioParts: string[] = [];
+      if (alias) bioParts.push(`Bí danh/Tên tự: ${alias}`);
+      if (phone) bioParts.push(`Liên hệ: ${phone}${phonePhu ? ` - ${phonePhu}` : ""}`);
+      if (residency) bioParts.push(`Trú quán: ${residency}`);
+      if (email) bioParts.push(`Thư điện tử: ${email}`);
+      if (fatherName) bioParts.push(`Phụ thân: ${fatherName}${fatherAddress ? ` (${fatherAddress})` : ""}`);
+      if (motherName) bioParts.push(`Mẫu thân: ${motherName}`);
+      if (spouse) bioParts.push(`Bạn đời: ${spouse}${spouseAddress ? ` (${spouseAddress})` : ""}`);
+      if (childrenList.length > 0) {
+        bioParts.push(`Cháu con gồm: ${childrenList.join(", ")}`);
+      }
+
+      parsedMembers.push({
+        id: finalId,
+        name: rawName,
+        generation: generationVal,
+        branch: "Chi Trưởng (Trường Yên)",
+        gender,
+        isDeceased,
+        birthYear: birthYear || undefined,
+        deathYear: isDeceased ? (deathYear || undefined) : undefined,
+        deathAnniversaryLunar: isDeceased ? (deathAnniversaryLunar || undefined) : undefined,
+        graveLocation: graveLocation || undefined,
+        spouse: spouse || undefined,
+        parentId: parentId || undefined,
+        bio: bioParts.join(" | ") || undefined,
+        children: [],
+        achievements: []
+      });
+    }
+
+    if (parsedMembers.length === 0) {
+      throw new Error("Không có quý danh nhân đinh hợp lệ nào khớp tiêu chuẩn trong bảng dữ liệu!");
+    }
+
+    setParsedPreview(parsedMembers);
+    setImportError(null);
+  };
+
+  // Upload trigger reading binary sheet
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadFileName(file.name);
+    
+    const fileReader = new FileReader();
+    fileReader.onload = (event) => {
+      try {
+        const binData = event.target?.result;
+        let workbook;
+        if (file.name.endsWith(".csv")) {
+          const arrBuffer = new Uint8Array(binData as ArrayBuffer);
+          const decodedText = new TextDecoder("utf-8").decode(arrBuffer);
+          workbook = XLSX.read(decodedText, { type: "string" });
+        } else {
+          const arrBuffer = new Uint8Array(binData as ArrayBuffer);
+          workbook = XLSX.read(arrBuffer, { type: "array" });
+        }
+        
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+        
+        parseSheetRows(rawRows);
+      } catch (err: any) {
+        setImportError("Lỗi đọc tệp Excel: " + (err.message || "Xin nạp tệp Excel (.xlsx, .xls) hoặc .csv đúng đặc tả."));
+      }
+    };
+    fileReader.readAsArrayBuffer(file);
+  };
+
+  // Direct clipboard text blocks parsing
   const handleParseBulk = () => {
     if (!bulkText.trim()) return;
     try {
       const lines = bulkText.split("\n");
-      const parsed: any[] = [];
-      
-      lines.forEach((line) => {
+      const sheetRows: any[][] = [];
+      lines.forEach(line => {
         if (!line.trim()) return;
         const tokens = line.split("\t");
-        
-        if (tokens.length >= 2) {
-          if (tokens[0].toLowerCase().includes("họ tên") || tokens[0].toLowerCase().includes("name")) {
-            return; // skip headers
-          }
-          const pName = tokens[0].trim();
-          const pGen = parseInt(tokens[1]) || 8;
-          const pBranch = tokens[2] ? tokens[2].trim() : "Chi Trưởng (Trường Yên)";
-          const pGenderStr = tokens[3] ? tokens[3].trim().toLowerCase() : "nam";
-          const pIsDecStr = tokens[4] ? tokens[4].trim().toLowerCase() : "không";
-          const pBirthY = tokens[5] ? tokens[5].trim() : "";
-          const pDeathY = tokens[6] ? tokens[6].trim() : "";
-          const pAnniversary = tokens[7] ? tokens[7].trim() : "";
-          const pGrave = tokens[8] ? tokens[8].trim() : "";
-          
-          parsed.push({
-            name: pName,
-            generation: pGen,
-            branch: pBranch,
-            gender: (pGenderStr === "nữ" || pGenderStr === "female") ? "Nữ" : "Nghị",
-            isDeceased: (pIsDecStr === "có" || pIsDecStr === "đã mất" || pIsDecStr === "yes" || pIsDecStr === "true"),
-            birthYear: pBirthY || undefined,
-            deathYear: pDeathY || undefined,
-            deathAnniversaryLunar: pAnniversary || undefined,
-            graveLocation: pGrave || undefined
-          });
-        }
+        sheetRows.push(tokens);
       });
       
-      if (parsed.length === 0) {
-        throw new Error("Không phát hiện hàng dữ liệu hợp lệ. Hãy đảm bảo copy dán dòng tab từ excel hoặc google sheets.");
-      }
-      setParsedPreview(parsed);
-      setImportError(null);
+      setUploadFileName("Vùng văn bản dán Excel (Clipboard Temp)");
+      parseSheetRows(sheetRows);
     } catch (err: any) {
-      setImportError(err.message || "Lỗi kiểm chứng định dạng.");
+      setImportError(err.message || "Phân mảnh dòng dán lỗi cấu trúc.");
     }
   };
 
+  // Push results into main state
   const handleCommitBulkImport = () => {
     if (parsedPreview.length === 0) return;
-    parsedPreview.forEach((p, idx) => {
-      const bMember: FamilyMember = {
-        id: "m_bulk_" + Date.now() + "_" + idx,
-        name: p.name,
-        generation: p.generation,
-        branch: p.branch,
-        gender: p.gender,
-        isDeceased: p.isDeceased,
-        birthYear: p.birthYear,
-        deathYear: p.deathYear,
-        deathAnniversaryLunar: p.deathAnniversaryLunar,
-        graveLocation: p.graveLocation,
-        achievements: [],
-        children: []
-      };
-      onAddMember(bMember);
-    });
+    
+    const newMembersToCommit: FamilyMember[] = parsedPreview.map((p, idx) => ({
+      id: p.id || ("m_bulk_" + Date.now() + "_" + idx),
+      name: p.name,
+      generation: p.generation || 8,
+      branch: p.branch || "Chi Trưởng (Trường Yên)",
+      gender: p.gender,
+      isDeceased: p.isDeceased,
+      birthYear: p.birthYear,
+      deathYear: p.deathYear,
+      deathAnniversaryLunar: p.deathAnniversaryLunar,
+      graveLocation: p.graveLocation,
+      spouse: p.spouse,
+      parentId: p.parentId,
+      bio: p.bio,
+      achievements: p.achievements || [],
+      children: p.children || []
+    }));
+
+    if (onBulkImport) {
+      onBulkImport(newMembersToCommit, importMode);
+      alert(
+        `✓ Đồng bộ cát tường! Đã ${
+          importMode === "replace" ? "Xoá sạch phả đồ cũ và Ghi mới" : "Bổ sung kế nối"
+        } ${newMembersToCommit.length} tộc nhân vào Gia phả trung ương họ Cao Ninh Bính.`
+      );
+    } else {
+      newMembersToCommit.forEach((bMember) => {
+        onAddMember(bMember);
+      });
+      alert(`✓ Đã kết nối bổ sung ${newMembersToCommit.length} tộc nhân vào Gia phả.`);
+    }
+
     setBulkText("");
     setParsedPreview([]);
+    setUploadFileName("");
+    setValidationScore(null);
+    setColumnMatches([]);
     setIsExcelOpen(false);
+  };
+
+  // Build standard blank template workbook for users
+  const downloadExcelTemplate = () => {
+    try {
+      const headers = [...FAMILY_COLUMNS_SPEC];
+      
+      // Sample record containing dummy details for user orientation
+      const sampleRow = [
+        "CAONB_M_1",
+        "Cao Văn Sinh",
+        "Nam",
+        "Tự Thúc Bảo",
+        "0912111222",
+        "0983111333",
+        "Trung Yên, Hoa Lư, Ninh Bình",
+        "sinhcao@ninhbinh.vn",
+        "1948",
+        "Đã mất",
+        "2019",
+        "12 tháng Giêng",
+        "Nghĩa trang Trường Yên, Hoa Lư",
+        "7",
+        "Cao Văn Trọng",
+        "Trường Yên",
+        "",
+        "1918",
+        "Đã mất",
+        "1992",
+        "mùng 9 tháng năm",
+        "Bia phần chi họ Trường Yên",
+        "CAONB_M_0",
+        "Nguyễn Thị Mận",
+        "Hoa Lư",
+        "",
+        "1922",
+        "Còn sống",
+        "",
+        "",
+        "",
+        "Lê Thị Thảo",
+        "Yên Khánh",
+        "",
+        "1952",
+        "Còn sống",
+        "",
+        "",
+        "",
+        "Cao Tiến Thành",
+        "Nam",
+        "Cao Bích Vân",
+        "Nữ",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ];
+      
+      const ws = XLSX.utils.aoa_to_sheet([headers, sampleRow]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Mau_Khao_Ta");
+      XLSX.writeFile(wb, "Mau_Gia_Pha_Cao_Ninh_Binh_55_Cot.xlsx");
+    } catch (err: any) {
+      alert("⚠️ Lỗi thiết lập tải thư viện: " + err.message);
+    }
   };
 
 
@@ -664,7 +974,7 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
               exit={{ opacity: 0, scale: 0.95 }}
               className="bg-white rounded-xl overflow-hidden shadow-2xl max-w-2xl w-full border border-stone-200 flex flex-col max-h-[90vh]"
             >
-              <div className="bg-emerald-900 px-5 py-4 text-white flex items-center justify-between border-b border-stone-150">
+              <div className="bg-emerald-900 px-5 py-4 text-white flex items-center justify-between border-b border-stone-150 shrink-0">
                 <h3 className="font-serif font-bold text-base text-amber-100 flex items-center gap-1.5">
                   <Database className="h-5 w-5" />
                   Đồng Bộ & Nhập Gia Phả Tiên Linh Từ Bảng Tính
@@ -675,6 +985,9 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
                     setBulkText("");
                     setParsedPreview([]);
                     setImportError(null);
+                    setUploadFileName("");
+                    setValidationScore(null);
+                    setColumnMatches([]);
                   }}
                   className="rounded-full hover:bg-white/10 p-1 text-stone-200 transition-all cursor-pointer"
                 >
@@ -683,60 +996,137 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
               </div>
 
               {/* Subtabs for xls */}
-              <div className="flex bg-stone-100 border-b border-stone-200 text-xs shrink-0 font-bold select-none">
+              <div className="flex bg-stone-100 border-b border-stone-200 text-xs shrink-0 font-bold select-none text-stone-700">
                 <button 
-                  onClick={() => setExcelActiveTab("paste")}
+                  onClick={() => {
+                    setExcelActiveTab("paste");
+                    setImportError(null);
+                  }}
                   className={`flex-1 py-3 text-center cursor-pointer transition-all ${
-                    excelActiveTab === "paste" ? "bg-white border-b-2 border-emerald-700 text-emerald-800" : "text-stone-550 hover:bg-stone-50"
+                    excelActiveTab === "paste" ? "bg-white border-b-2 border-emerald-700 text-emerald-800 font-extrabold" : "text-stone-550 hover:bg-stone-50"
                   }`}
                 >
-                  Dán Dữ Liệu Từ Excel / Sheet
+                  Tải Tệp Excel / CSV lên
                 </button>
                 <button 
-                  onClick={() => setExcelActiveTab("script")}
-                  className={`flex-1 py-3 text-center cursor-pointer transition-all ${
-                    excelActiveTab === "script" ? "bg-white border-b-2 border-emerald-700 text-emerald-800" : "text-stone-550 hover:bg-stone-50"
+                  onClick={() => {
+                    setExcelActiveTab("script");
+                    setImportError(null);
+                  }}
+                  className={`flex-2 py-3 text-center cursor-pointer transition-all ${
+                    excelActiveTab === "script" ? "bg-white border-b-2 border-emerald-700 text-emerald-800 font-extrabold" : "text-stone-550 hover:bg-stone-50"
                   }`}
                 >
-                  Google Sheets App Script & Google APIs
+                  Dán Dữ Liệu trực tiếp (Clipboard)
+                </button>
+                <button 
+                  onClick={() => {
+                    setExcelActiveTab("script_auto");
+                    setImportError(null);
+                  }}
+                  className={`flex-1.5 py-3 text-center cursor-pointer transition-all ${
+                    excelActiveTab === "script_auto" ? "bg-white border-b-2 border-emerald-700 text-emerald-800 font-extrabold" : "text-stone-550 hover:bg-stone-50"
+                  }`}
+                >
+                  Tự động hóa Apps Script API
                 </button>
               </div>
 
-              <div className="p-5 overflow-y-auto space-y-4 text-xs grow">
+              <div className="p-5 overflow-y-auto space-y-4 text-xs grow text-left">
                 
-                {excelActiveTab === "paste" && (
-                  <div className="space-y-4 text-left">
+                {/* 1. DOWNLOAD SAMPLE AND IMPORT CONFIG SECTION */}
+                <div className="bg-stone-50 p-4 border border-stone-200/80 rounded-xl space-y-3.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-stone-700">
                     <div>
-                      <h4 className="font-bold text-stone-800">1. Định dạng cột chuẩn trên Bảng Tính:</h4>
-                      <p className="text-[11px] text-stone-500 leading-normal mt-0.5">
-                        Xếp các cột trên Excel / Google Sheet theo thứ tự sau (Không bắt buộc hàng tiêu đề, chỉ cần copy các hàng giá trị):
+                      <h4 className="font-bold text-stone-850">Yêu cầu khuôn mẫu chuẩn:</h4>
+                      <p className="text-[10.5px] text-stone-500 leading-normal mt-0.5">
+                        Tải bảng mẫu 55 cột đặc tả dòng họ làm khung biên soạn chính thức để tránh sai lệch.
                       </p>
-                      <pre className="bg-stone-100 border border-stone-200 rounded p-2 text-[10px] font-mono text-stone-750 block mt-1 overflow-x-auto whitespace-pre">
-                        Họ tên | Đời | Chi phái | Giới tính | Còn sống | Năm sinh | Năm mất | Ngày giỗ | Nơi an táng
-                      </pre>
-                      <button 
-                        type="button"
-                        onClick={() => {
-                          setBulkText(
-                            "Cao Văn Hưng\t5\tChi Trưởng (Trường Yên)\tNam\tĐã mất\t1864\t1938\t12 tháng Giêng\tNghĩa trang Trường Yên\n" +
-                            "Cao Thị Huyền\t6\tChi Thứ Hai (Yên Khánh)\tNữ\tCó\t1942\t\t\t\n" +
-                            "Cao Tiến Thành\t7\tChi Trưởng (Trường Yên)\tNam\tCó\t1981\t\t\t"
-                          );
-                        }}
-                        className="text-[10px] mt-1.5 font-bold text-emerald-800 hover:underline cursor-pointer"
-                      >
-                        [📎 Nhập dán dữ liệu mẫu nhanh để thử nghiệm]
-                      </button>
                     </div>
+                    <button 
+                      type="button"
+                      onClick={downloadExcelTemplate}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 bg-emerald-50 text-emerald-850 hover:bg-emerald-100 border border-emerald-250 rounded-lg text-xs font-black transition-all cursor-pointer shrink-0"
+                    >
+                      <Download className="h-4 w-4" />
+                      Tải mẫu excel phả phả đồ
+                    </button>
+                  </div>
 
-                    <div className="space-y-1.5">
-                      <label className="font-bold text-stone-700 block">2. Dán các dòng dữ liệu sao chép từ Excel/Google Sheets vào đây:*</label>
+                  <div className="border-t border-stone-200/50 pt-3 text-stone-750">
+                    <label className="font-black text-stone-800 block mb-1.5">Chế độ đồng bộ dữ liệu tải lên:*</label>
+                    <div className="grid grid-cols-2 gap-4">
+                      <label className="flex items-center gap-2 p-2.5 bg-white border border-stone-200 hover:border-emerald-550 rounded-lg cursor-pointer transition-all select-none">
+                        <input 
+                          type="radio" 
+                          name="importMode" 
+                          checked={importMode === "append"} 
+                          onChange={() => setImportMode("append")}
+                          className="accent-emerald-700"
+                        />
+                        <div>
+                          <strong className="block text-[11px] text-stone-800">Bổ sung tiếp nối</strong>
+                          <span className="text-[9px] text-stone-400">Chèn thêm mới tộc nhân, giữ phả hệ cũ.</span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-center gap-2 p-2.5 bg-white border border-stone-200 hover:border-red-650 rounded-lg cursor-pointer transition-all select-none">
+                        <input 
+                          type="radio" 
+                          name="importMode" 
+                          checked={importMode === "replace"} 
+                          onChange={() => setImportMode("replace")}
+                          className="accent-red-700"
+                        />
+                        <div>
+                          <strong className="block text-[11px] text-red-800">Xóa hết làm mới</strong>
+                          <span className="text-[9px] text-stone-400">Làm sạch phả phu hiện tại và nạp tệp mới.</span>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                {/* TAB 1: FILE SELECT & DRAG-DROP */}
+                {excelActiveTab === "paste" && (
+                  <div className="space-y-3.5">
+                    <label className="font-bold text-stone-700 block">Kéo thả hoặc duyệt chọn tài liệu:</label>
+                    
+                    <div 
+                      onClick={() => fileInputRef.current?.click()}
+                      className="border-2 border-dashed border-stone-200 hover:border-emerald-600 bg-stone-50/50 hover:bg-emerald-50/10 rounded-xl p-6 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2.5 select-none"
+                    >
+                      <Upload className="h-8 w-8 text-stone-400 animate-bounce" />
+                      <span className="font-bold text-stone-700 text-xs">Hãy thả tệp tin Excel (.xlsx, .xls) hoặc CSV (.csv) vào đây</span>
+                      <span className="text-[10px] text-stone-400">Hoặc click để chọn một tệp tiêu thức dòng họ từ thiết bị</span>
+                      
+                      {uploadFileName && (
+                        <div className="mt-2 px-3 py-1 bg-emerald-50 text-emerald-800 rounded border border-emerald-150 flex items-center gap-1 font-bold">
+                          <Check className="h-3 w-3" /> Đã chọn tệp: {uploadFileName}
+                        </div>
+                      )}
+                    </div>
+                    <input 
+                      type="file" 
+                      ref={fileInputRef} 
+                      onChange={handleFileUpload} 
+                      accept=".xlsx,.xls,.csv" 
+                      className="hidden" 
+                    />
+                  </div>
+                )}
+
+                {/* TAB 2: COPY PASTE DIRECT TEXT BLOCK */}
+                {excelActiveTab === "script" && (
+                  <div className="space-y-3">
+                    <div className="space-y-1.5/40 text-left">
+                      <label className="font-bold text-stone-700 block">Dán các hàng dữ liệu sao chép từ Excel/Google Sheets vào đây:*</label>
                       <textarea 
                         rows={5}
                         value={bulkText}
                         onChange={(e) => setBulkText(e.target.value)}
-                        placeholder="Hãy copy vùng dữ liệu trên Google Sheets rồi Ctrl+V dán vào đây..."
-                        className="w-full bg-stone-50 border border-stone-200 rounded-lg p-2.5 font-mono text-[11px] focus:outline-none focus:border-emerald-600 resize-none leading-relaxed"
+                        placeholder="Quét chọn vùng dữ liệu từ Google Sheets/Excel (55 cột) rồi bấm Ctrl+V dán vào đây..."
+                        className="w-full bg-stone-50 border border-stone-200 rounded-lg p-3 font-mono text-[10px] focus:outline-none focus:border-emerald-600 resize-none leading-relaxed text-stone-800"
                       />
                     </div>
 
@@ -745,77 +1135,44 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
                         type="button" 
                         onClick={handleParseBulk}
                         disabled={!bulkText.trim()}
-                        className="bg-emerald-800 hover:bg-emerald-950 disabled:bg-stone-200 disabled:text-stone-400 text-white rounded px-4 py-2 font-bold cursor-pointer transition-all"
+                        className="bg-emerald-800 hover:bg-emerald-950 disabled:bg-stone-150 disabled:text-stone-350 text-white rounded-lg px-4.5 py-2 font-bold cursor-pointer transition-all"
                       >
-                        Kiểm chứng định dạng nhập liệu
+                        Kiểm chứng dòng dán
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => {
+                          setBulkText(
+                            "EX_NB01\tCao Hồng Sơn\tNam\tTự Minh\t0912111\t\tTrường Yên\ts@hn.vn\t1952\tĐã mất\t2021\t12 tháng 3\tNghĩa trang huyện\t7\t\t\t\t\t\t\t\t\tEX_NB00\n" +
+                            "EX_NB02\tCao Bích Hà\tNữ\tCô Ba\t\t\tTrường Yên\t\t1983\tCòn sống\t\t\t\t8\tCao Hồng Sơn\t\t\t\t\t\t\t\tEX_NB01\tNguyễn Thị Lan"
+                          );
+                        }}
+                        className="text-[10px] font-bold text-emerald-800 hover:underline cursor-pointer select-none"
+                      >
+                        [📎 Nạp mẫu dán nhanh]
                       </button>
                     </div>
-
-                    {importError && (
-                      <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-800">
-                        {importError}
-                      </div>
-                    )}
-
-                    {/* Parsed entries visualizer */}
-                    {parsedPreview.length > 0 && (
-                      <div className="space-y-2 border border-stone-200 rounded-lg p-3 bg-stone-50">
-                        <div className="flex justify-between items-center pb-1.5 border-b border-stone-200">
-                          <p className="font-bold text-stone-800">✓ Phát hiện hợp lệ {parsedPreview.length} bản ghi chép:</p>
-                        </div>
-                        <div className="max-h-36 overflow-y-auto border border-stone-150 rounded bg-white text-[10px]">
-                          <table className="w-full text-left">
-                            <thead className="bg-stone-100 text-stone-500 border-b border-stone-150">
-                              <tr>
-                                <th className="p-1.5 font-semibold">Quý danh</th>
-                                <th className="p-1.5 font-semibold">Đời</th>
-                                <th className="p-1.5 font-semibold">Chi phái</th>
-                                <th className="p-1.5 font-semibold">Giới tính</th>
-                                <th className="p-1.5 font-semibold">Còn sống</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-stone-100 text-stone-700">
-                              {parsedPreview.map((p, i) => (
-                                <tr key={i} className="hover:bg-stone-50/50">
-                                  <td className="p-1.5 font-bold text-stone-850">{p.name}</td>
-                                  <td className="p-1.5 font-mono font-bold">{p.generation}</td>
-                                  <td className="p-1.5 text-stone-500">{p.branch}</td>
-                                  <td className="p-1.5">{p.gender}</td>
-                                  <td className="p-1.5">{p.isDeceased ? "Đã mất" : "Còn sống"}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-
-                        <div className="pt-2 text-right">
-                          <button 
-                            type="button"
-                            onClick={handleCommitBulkImport}
-                            className="bg-emerald-700 hover:bg-emerald-950 text-white font-black px-4.5 py-2.5 rounded-lg text-xs cursor-pointer shadow-md transition-all"
-                          >
-                            Đồng bộ và Thêm dâng {parsedPreview.length} tộc nhân vào Gia Phả
-                          </button>
-                        </div>
-                      </div>
-                    )}
                   </div>
                 )}
 
-                {excelActiveTab === "script" && (
+                {/* TAB 3: REST API / APPS SCRIPT AUTOMATION */}
+                {excelActiveTab === "script_auto" && (
                   <div className="space-y-3 text-left">
                     <div>
-                      <h4 className="font-bold text-emerald-900 border-b border-stone-150 pb-1">Đồng Bộ Bằng Google Apps Script</h4>
-                      <p className="text-[11px] text-stone-500 mt-1.5 leading-relaxed">
-                        Bạn có thể kết hợp tự động hóa qua Google Sheets. Tạo một nút bấm trên Google Sheet của bạn, liên kết với Google Apps Script để đẩy dữ liệu thẳng về REST API dòng họ Cao Ninh Bình:
+                      <h4 className="font-bold text-emerald-900 border-b border-stone-150 pb-1 flex items-center gap-1">
+                        <Database className="h-4 w-4" />
+                        Đồng Bộ Tự Động Qua Google Apps Script API
+                      </h4>
+                      <p className="text-[10px] text-stone-500 mt-1.5 leading-relaxed">
+                        Bạn có thể kết hợp tự động hóa qua Google Sheets. Tạo một nút bấm trên Google Sheet của dòng họ bạn, liên kết với Google Apps Script để đẩy dữ liệu thẳng về REST API Họ Cao Ninh Bình:
                       </p>
                     </div>
 
-                    <div className="space-y-1.5 relative">
+                    <div className="space-y-1 relative">
                       <div className="flex justify-between items-center text-stone-400 font-bold uppercase text-[9px]">
-                        <span>Mã nguồn Google Apps Script (Javascript):</span>
+                        <span>Mã nguồn Google Apps Script (Thư viện Javascript):</span>
                       </div>
-                      <pre className="p-3 bg-slate-900 text-slate-100 rounded-lg font-mono text-[9.5px] block overflow-x-auto select-all max-h-56 leading-relaxed">
+                      <pre className="p-3 bg-slate-900 text-slate-100 rounded-lg font-mono text-[9px] block overflow-x-auto select-all max-h-48 leading-relaxed">
 {`function syncGenealogyToClanPortal() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   var data = sheet.getDataRange().getValues();
@@ -824,17 +1181,12 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
   // Vòng lặp từ hàng 2 bỏ qua tiêu đề
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
-    if(!row[0]) continue;
+    if(!row[1]) continue;
     membersList.push({
-      name: row[0],
-      generation: parseInt(row[1]) || 8,
-      branch: row[2] || "Chi Trưởng (Trường Yên)",
-      gender: row[3] === "Nữ" ? "Nữ" : "Nghị",
-      isDeceased: row[4] === "Có" || row[4] === "Đã mất",
-      birthYear: row[5] ? String(row[5]) : undefined,
-      deathYear: row[6] ? String(row[6]) : undefined,
-      deathAnniversaryLunar: row[7] ? String(row[7]) : undefined,
-      graveLocation: row[8] ? String(row[8]) : undefined
+      id: row[0] || undefined,
+      name: row[1],
+      gender: row[2] === "Nữ" ? "Nữ" : "Nghị",
+      bio: "Đồng bộ qua API Google Sheets"
     });
   }
   
@@ -845,17 +1197,128 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
     payload: JSON.stringify({ members: membersList })
   };
   UrlFetchApp.fetch(url, options);
-  SpreadsheetApp.getUi().alert("Đồng bộ dữ liệu dòng họ Cao Ninh Bình hoàn kỵ cát tường!");
+  SpreadsheetApp.getUi().alert("Đồng bộ dữ liệu dòng họ Cao Ninh Bình cát tường!");
 }`}
                       </pre>
-                    </div>
-
-                    <div className="bg-amber-50 rounded-lg p-2.5 border border-amber-250 select-none text-[10px] text-stone-600 leading-normal">
-                      📢 <strong>Khuyên dùng:</strong> Sử dụng phương pháp này giúp các chi phái ở xa tự quản lý bảng tính nhang đèn của chi mình riêng lẻ, khi nào xong chỉ cần click nút đồng bộ để tải nạp dữ liệu lập tức lên hệ thống trung tâm phả đồ.
                     </div>
                   </div>
                 )}
 
+                {/* STANDARD CHECKPOINT VALIDATION SCORE DASHBOARD */}
+                {validationScore !== null && (
+                  <div className="space-y-3 border border-amber-200 bg-amber-500/5 rounded-xl p-4 text-left">
+                    <div className="flex items-center justify-between border-b border-stone-200 pb-2">
+                      <div className="flex items-center gap-2">
+                        <div className="h-7 w-7 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-800 shrink-0">
+                          <Check className="h-4 w-4" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-stone-800 text-[11px] uppercase">Hệ Thống Kiểm Chứng 55 Cột Đặc Tả</h4>
+                          <span className="text-[9.5px] text-stone-500 block">Độ tương thích định dạng file nạp</span>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-black border ${
+                          validationScore >= 80 ? "bg-emerald-100 border-emerald-250 text-emerald-850" : "bg-amber-100 border-amber-250 text-amber-850"
+                        }`}>
+                          Độ khớp cấu trúc: {validationScore}%
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <span className="font-bold text-stone-750 block text-[10px]">Sơ đồ đối chiếu cột mẫu dòng họ phả đồ:</span>
+                      
+                      <div className="grid grid-cols-2 xs:grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-36 overflow-y-auto p-1.5 border border-stone-150 rounded bg-white text-[9px]">
+                        {columnMatches.map((col, idx) => (
+                          <div key={idx} className={`p-1.5 rounded border flex flex-col justify-between truncate ${
+                            col.status === "matched" 
+                              ? "bg-emerald-500/5 border-emerald-200 text-emerald-900" 
+                              : col.status === "mismatched"
+                              ? "bg-amber-500/5 border-amber-200 text-amber-950"
+                              : "bg-stone-50 border-stone-200 text-stone-400"
+                          }`}>
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold block text-[8px] opacity-60">Cột {idx + 1}</span>
+                              {col.status === "matched" ? (
+                                <span className="text-[7.5px] bg-emerald-100 px-1 py-0.2 rounded font-semibold text-emerald-900">Khớp</span>
+                              ) : col.status === "mismatched" ? (
+                                <span className="text-[7.5px] bg-amber-100 px-1 py-0.2 rounded font-semibold text-amber-900">Mới</span>
+                              ) : (
+                                <span className="text-[7.5px] bg-stone-150 px-1 py-0.2 rounded font-semibold text-stone-500">Khuyết</span>
+                              )}
+                            </div>
+                            <span className="text-[9.5px] font-bold block mt-1 line-clamp-1" title={col.name}>{col.name}</span>
+                            {col.sampleValue && (
+                              <span className="text-[8px] italic text-stone-450 truncate mt-0.5 block" title={`Giá trị mẫu: ${col.sampleValue}`}>
+                                Mẫu: {col.sampleValue}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {importError && (
+                  <div className="p-3 bg-red-50 border border-red-250 rounded-lg text-red-800 flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-red-700 mt-0.5" />
+                    <div className="text-[10.5px]">
+                      <strong className="block font-bold">Lỗi trong quá trình kiểm tra định dạng:</strong>
+                      {importError}
+                    </div>
+                  </div>
+                )}
+
+                {/* Parsed entries visualizer */}
+                {parsedPreview.length > 0 && (
+                  <div className="space-y-3.5 border border-stone-200 rounded-xl p-3 bg-stone-50 text-left">
+                    <div className="flex justify-between items-center pb-1.5 border-b border-stone-200">
+                      <p className="font-bold text-stone-800">✓ Đã tuyển trạch {parsedPreview.length} tộc nhân thành công:</p>
+                      <span className="text-[10px] text-stone-400">Độ chuẩn thế thế triều</span>
+                    </div>
+                    
+                    <div className="max-h-36 overflow-y-auto border border-stone-150 rounded bg-white text-[10px]">
+                      <table className="w-full text-left">
+                        <thead className="bg-stone-550 text-stone-750 border-b border-stone-200">
+                          <tr>
+                            <th className="p-1.5 font-bold">Quý danh</th>
+                            <th className="p-1.5 font-bold">Đề vị Đời</th>
+                            <th className="p-1.5 font-bold">Giới tính</th>
+                            <th className="p-1.5 font-bold">Năm sinh</th>
+                            <th className="p-1.5 font-bold">Trạng thái</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-stone-100 text-stone-700">
+                          {parsedPreview.map((p, i) => (
+                            <tr key={i} className="hover:bg-stone-50/50">
+                              <td className="p-1.5 font-bold text-stone-900">{p.name}</td>
+                              <td className="p-1.5 font-mono">Đời thứ {p.generation}</td>
+                              <td className="p-1.5">{p.gender}</td>
+                              <td className="p-1.5 font-mono text-stone-500">{p.birthYear || "Không rõ"}</td>
+                              <td className="p-1.5 font-semibold text-stone-500">
+                                {p.isDeceased ? "Cụ Quy tiên" : "Đang sống"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="pt-2 text-right">
+                      <button 
+                        type="button"
+                        onClick={handleCommitBulkImport}
+                        className={`font-black px-5 py-2.5 rounded-lg text-xs cursor-pointer shadow-md transition-all text-white ${
+                          importMode === "replace" ? "bg-red-700 hover:bg-red-950" : "bg-emerald-700 hover:bg-emerald-950"
+                        }`}
+                      >
+                        {importMode === "replace" ? "⚠️ XOÁ SẠCH PHẢ ĐỒ & GHI MỚI" : "ĐỒNG BỘ BỔ SUNG GIA PHẢ"} ({parsedPreview.length} TỘC NHÂN)
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
               
               <div className="px-5 py-3 border-t border-stone-150 bg-stone-50 text-right shrink-0">
@@ -866,8 +1329,11 @@ export default function Genealogy({ members, onAddMember }: GenealogyProps) {
                     setBulkText("");
                     setParsedPreview([]);
                     setImportError(null);
+                    setUploadFileName("");
+                    setValidationScore(null);
+                    setColumnMatches([]);
                   }}
-                  className="bg-stone-100 hover:bg-stone-250 border border-stone-200 rounded px-4 py-1.5 transition-all cursor-pointer font-bold select-none text-stone-850"
+                  className="bg-stone-100 hover:bg-stone-200 border border-stone-250 rounded-lg px-4 py-1.5 transition-all text-stone-850 font-bold cursor-pointer"
                 >
                   Đóng Hộp thoại
                 </button>

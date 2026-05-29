@@ -140,6 +140,14 @@ export default function App() {
     setMembers((prev) => [newMem, ...prev]);
   };
 
+  const handleBulkImport = (newMems: FamilyMember[], mode: "replace" | "append") => {
+    if (mode === "replace") {
+      setMembers(newMems);
+    } else {
+      setMembers((prev) => [...prev, ...newMems]);
+    }
+  };
+
   const handleAddEvent = (newEv: ClanEvent) => {
     setEvents((prev) => [newEv, ...prev]);
   };
@@ -243,6 +251,7 @@ export default function App() {
               <Genealogy 
                 members={members} 
                 onAddMember={handleAddMember} 
+                onBulkImport={handleBulkImport}
               />
             )}
 
